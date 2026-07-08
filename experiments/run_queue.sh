@@ -39,3 +39,4 @@ while IFS= read -r cmd; do
   echo "=== $(date -Is) START: $cmd"
   eval "$cmd" || echo "=== FAILED (continuing): $cmd"
 done < "$1"
+echo "=== $(date -Is) QUEUE COMPLETE: $1"
