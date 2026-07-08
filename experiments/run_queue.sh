@@ -21,8 +21,21 @@ if [[ -z "${FORCE:-}" && "${used_mib:-0}" -gt 2048 ]]; then
   exit 1
 fi
 
+wait_gpu_free() {
+  # a crashed job's CUDA teardown can take a while on this stack; don't let
+  # the next job load into a still-draining card
+  for _ in $(seq 60); do
+    local used
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
+    [[ "${used:-0}" -le 2048 ]] && return 0
+    sleep 5
+  done
+  echo "=== WARNING: GPU still holds ${used} MiB after 5 min; continuing anyway"
+}
+
 while IFS= read -r cmd; do
   [[ -z "$cmd" || "$cmd" == \#* ]] && continue
+  wait_gpu_free
   echo "=== $(date -Is) START: $cmd"
   eval "$cmd" || echo "=== FAILED (continuing): $cmd"
 done < "$1"

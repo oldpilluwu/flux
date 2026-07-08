@@ -41,7 +41,9 @@ def main():
     args = p.parse_args()
 
     device = torch.device("cuda")
-    h = w = 2 * math.ceil(args.size / 16)          # token grid, 64 for 1024px
+    # token grid AFTER 2x2 packing: latent is 2*ceil(size/16) pixels per side,
+    # tokens are half that — 64x64 = 4096 tokens for 1024 px
+    h = w = math.ceil(args.size / 16)
     taus = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
     sizes = [8, 4, 2]
 
