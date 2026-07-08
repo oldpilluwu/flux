@@ -42,10 +42,16 @@ def main():
     device = torch.device("cuda")
     t5 = load_t5(device, max_length=512)
     clip = load_clip(device)
-    model = load_flow_model(args.name, device=device)
 
     x = get_noise(1, args.size, args.size, device, torch.bfloat16, 0)
     inp = prepare(t5, clip, x, prompt=args.prompt)
+    # encoders are not needed during the profiled denoise steps; freeing them
+    # before the transformer loads keeps 2048 px (seq 16 896) inside 48 GB
+    # (EXECUTE_SERVER.md Phase 1 observations table)
+    del t5, clip
+    torch.cuda.empty_cache()
+
+    model = load_flow_model(args.name, device=device)
     timesteps = get_schedule(50, inp["img"].shape[1], shift=(args.name != "flux-schnell"))
     guidance_vec = torch.full((1,), 3.5, device=device, dtype=inp["img"].dtype)
 
