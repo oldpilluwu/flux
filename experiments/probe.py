@@ -40,6 +40,11 @@ def main():
     p.add_argument("--out", default="results/probe")
     args = p.parse_args()
 
+    out_json = Path(args.out) / f"probe_{args.seed}.json"
+    if out_json.exists():  # resume: re-queued runs skip completed probes
+        print(f"skip (exists): {out_json}")
+        return
+
     device = torch.device("cuda")
     # token grid AFTER 2x2 packing: latent is 2*ceil(size/16) pixels per side,
     # tokens are half that — 64x64 = 4096 tokens for 1024 px
