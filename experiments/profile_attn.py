@@ -20,6 +20,8 @@ from torch.profiler import ProfilerActivity, profile
 from flux.sampling import get_noise, get_schedule, prepare
 from flux.util import load_clip, load_flow_model, load_t5
 
+from generate import pack_img
+
 ATTN_MARKERS = ("scaled_dot_product", "sdpa", "flash", "mem_eff", "attention")
 
 
@@ -35,21 +37,35 @@ def main():
     p.add_argument("--size", type=int, default=1024)
     p.add_argument("--steps", type=int, default=3)
     p.add_argument("--prompt",
-                   default="a crowded farmers market with dozens of people, fruit stalls")
+                   default="a crowded farmers market with dozens of people, "
+                           "fruit stalls and colorful awnings")
+    p.add_argument("--text-cache", default="text_cache.pt",
+                   help="precomputed text encodings; pass '' to load T5/CLIP instead")
     p.add_argument("--out", default=None, help="optional JSON output path")
     args = p.parse_args()
 
     device = torch.device("cuda")
-    t5 = load_t5(device, max_length=512)
-    clip = load_clip(device)
-
     x = get_noise(1, args.size, args.size, device, torch.bfloat16, 0)
-    inp = prepare(t5, clip, x, prompt=args.prompt)
-    # encoders are not needed during the profiled denoise steps; freeing them
-    # before the transformer loads keeps 2048 px (seq 16 896) inside 48 GB
+
+    # the encoders are only needed to build `inp` and their load spikes both
+    # host RAM and VRAM next to the transformer — prefer the text cache, and
+    # in either case free them before the transformer loads
     # (EXECUTE_SERVER.md Phase 1 observations table)
-    del t5, clip
-    torch.cuda.empty_cache()
+    if args.text_cache and Path(args.text_cache).exists():
+        cache = torch.load(args.text_cache, map_location="cpu", weights_only=True)
+        if args.prompt not in cache:
+            raise SystemExit(f"prompt not in {args.text_cache}: {args.prompt!r}")
+        img, img_ids = pack_img(x)
+        txt = cache[args.prompt]["txt"].to(device)
+        inp = {"img": img, "img_ids": img_ids, "txt": txt,
+               "txt_ids": torch.zeros(1, txt.shape[1], 3, device=device),
+               "vec": cache[args.prompt]["vec"].to(device)}
+    else:
+        t5 = load_t5(device, max_length=512)
+        clip = load_clip(device)
+        inp = prepare(t5, clip, x, prompt=args.prompt)
+        del t5, clip
+        torch.cuda.empty_cache()
 
     model = load_flow_model(args.name, device=device)
     timesteps = get_schedule(50, inp["img"].shape[1], shift=(args.name != "flux-schnell"))
