@@ -1,0 +1,8 @@
+# Phase 1 — timing calibration + attention share (EXECUTE_SERVER.md Phase 1)
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase1.txt > queue_phase1.log 2>&1 &
+python precompute_text.py --out text_cache.pt
+python generate.py --name flux-dev --size 512  --steps 28 --limit 3 --seeds 0 --text-cache text_cache.pt --out results/timing_512
+python generate.py --name flux-dev --size 1024 --steps 50 --limit 3 --seeds 0 --text-cache text_cache.pt --out results/timing_1024
+python generate.py --name flux-dev --size 2048 --steps 50 --limit 3 --seeds 0 --text-cache text_cache.pt --out results/timing_2048
+python profile_attn.py --size 1024 --out results/attn_share_1024.json
+python profile_attn.py --size 2048 --out results/attn_share_2048.json

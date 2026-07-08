@@ -1,0 +1,7 @@
+# Phase 2 — baseline + smoke baseline + probe (EXECUTE_SERVER.md Phase 2)
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase2.txt > queue_phase2.log 2>&1 &
+python generate.py --name flux-dev --size 1024 --steps 50 --seeds 0 1 2 3 --text-cache text_cache.pt --out results/base_dev_1024
+python generate.py --name flux-dev --size 512  --steps 28 --seeds 0 1 --text-cache text_cache.pt --out results/base_dev_512_smoke
+python probe.py --prompt "a calm lake reflecting snowy mountains, large clear sky" --out results/probe_flat
+python probe.py --prompt "a portrait photo of an old fisherman with a weathered face, studio lighting, plain grey background" --out results/probe_med
+python probe.py --prompt "an intricate steampunk clockwork mechanism with hundreds of brass gears" --out results/probe_dense

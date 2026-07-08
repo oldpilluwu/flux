@@ -230,3 +230,9 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/linux,windows,macos,visualstudiocode,python
 
 output/
+
+# DiffusionAdaptive experiments — results and caches stay on the server
+experiments/results/
+experiments/text_cache.pt
+experiments/*.log
+checkpoints/
