@@ -16,6 +16,14 @@ class HFEmbedder(nn.Module):
             self.tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(version, max_length=max_length)
             self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(version, **hf_kwargs)
 
+        # transformers >= 5 ignores the legacy `torch_dtype` kwarg (renamed to
+        # `dtype`), which loads these fp32 checkpoints at full precision
+        # (~19 GB for T5-XXL); cast explicitly so the requested dtype always
+        # sticks regardless of transformers version
+        requested_dtype = hf_kwargs.get("torch_dtype") or hf_kwargs.get("dtype")
+        if requested_dtype is not None and next(self.hf_module.parameters()).dtype != requested_dtype:
+            self.hf_module = self.hf_module.to(requested_dtype)
+
         self.hf_module = self.hf_module.eval().requires_grad_(False)
 
     def forward(self, text: list[str]) -> Tensor:
