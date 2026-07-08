@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from flux.sampling import get_noise, get_schedule, prepare
 from flux.util import load_clip, load_flow_model, load_t5
 
+from generate import pack_img
+
 
 def block_view(x, h, w, s):
     # x: (N, D) -> (n_blocks, s*s, D)
@@ -38,6 +40,8 @@ def main():
     p.add_argument("--prompt", default="a crowded farmers market with dozens of people")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="results/probe")
+    p.add_argument("--text-cache", default="text_cache.pt",
+                   help="precomputed text encodings; pass '' to load T5/CLIP instead")
     args = p.parse_args()
 
     out_json = Path(args.out) / f"probe_{args.seed}.json"
@@ -52,12 +56,28 @@ def main():
     taus = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
     sizes = [8, 4, 2]
 
-    t5 = load_t5(device, max_length=512)
-    clip = load_clip(device)
-    model = load_flow_model(args.name, device=device)
-
     x = get_noise(1, args.size, args.size, device, torch.bfloat16, args.seed)
-    inp = prepare(t5, clip, x, prompt=args.prompt)
+
+    # keeping T5/CLIP in the same process as the 24 GB transformer load blows
+    # the host-RAM watchdog on this machine — prefer the text cache, and in
+    # either case free the encoders before the transformer loads
+    if args.text_cache and Path(args.text_cache).exists():
+        cache = torch.load(args.text_cache, map_location="cpu", weights_only=True)
+        if args.prompt not in cache:
+            raise SystemExit(f"prompt not in {args.text_cache}: {args.prompt!r}")
+        img_packed, img_ids_packed = pack_img(x)
+        txt = cache[args.prompt]["txt"].to(device)
+        inp = {"img": img_packed, "img_ids": img_ids_packed, "txt": txt,
+               "txt_ids": torch.zeros(1, txt.shape[1], 3, device=device),
+               "vec": cache[args.prompt]["vec"].to(device)}
+    else:
+        t5 = load_t5(device, max_length=512)
+        clip = load_clip(device)
+        inp = prepare(t5, clip, x, prompt=args.prompt)
+        del t5, clip
+        torch.cuda.empty_cache()
+
+    model = load_flow_model(args.name, device=device)
     img, img_ids = inp["img"], inp["img_ids"]
     timesteps = get_schedule(args.steps, img.shape[1], shift=(args.name != "flux-schnell"))
 
