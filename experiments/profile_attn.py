@@ -1,9 +1,14 @@
-"""Attention-share measurement (EXECUTE_SERVER.md Phase 1.3).
+"""Attention-share measurement via CUDA events (EXECUTE_SERVER.md Phase 1.3).
 
-Profiles a few transformer steps with torch.profiler and reports what
-fraction of GPU step time is spent in SDPA/attention kernels. This number
-calibrates the *expected* wall-clock speedup for any token-compression
-ratio (TASK.md §5.2 "theoretical attention saving" sanity check).
+Reports what fraction of a denoise step's GPU time is spent in attention:
+  - attention_share:           scaled_dot_product_attention only — the
+                               quadratic term token merging shrinks
+  - attention_share_incl_rope: the full flux attention() op (RoPE + SDPA
+                               + reshape), which also scales with N
+
+torch.profiler/CUPTI ballooned host memory past this machine's watchdog
+(CUDA 13 driver stack), so attention calls are bracketed with CUDA events
+instead — no profiler, negligible overhead.
 
 Run at --size 1024 and --size 2048; the 2048 share decides whether the
 Phase-7 showcase is promoted to load-bearing (EXECUTE_SERVER.md Phase 1
@@ -15,19 +20,37 @@ import json
 from pathlib import Path
 
 import torch
-from torch.profiler import ProfilerActivity, profile
 
+import flux.modules.layers as flux_layers
+from flux.math import attention as flux_attention
 from flux.sampling import get_noise, get_schedule, prepare
 from flux.util import load_clip, load_flow_model, load_t5
 
 from generate import pack_img
 
-ATTN_MARKERS = ("scaled_dot_product", "sdpa", "flash", "mem_eff", "attention")
 
+class EventPairs:
+    """Collects (start, end) CUDA event pairs around a wrapped callable."""
 
-def cuda_time(evt) -> float:
-    # torch >= 2.1 renames self_cuda_time_total -> self_device_time_total
-    return getattr(evt, "self_device_time_total", None) or evt.self_cuda_time_total
+    def __init__(self):
+        self.pairs = []
+
+    def wrap(self, fn):
+        pairs = self.pairs
+
+        def timed(*args, **kwargs):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            out = fn(*args, **kwargs)
+            end.record()
+            pairs.append((start, end))
+            return out
+
+        return timed
+
+    def total_ms(self) -> float:
+        return sum(s.elapsed_time(e) for s, e in self.pairs)
 
 
 @torch.no_grad()
@@ -50,7 +73,6 @@ def main():
     # the encoders are only needed to build `inp` and their load spikes both
     # host RAM and VRAM next to the transformer — prefer the text cache, and
     # in either case free them before the transformer loads
-    # (EXECUTE_SERVER.md Phase 1 observations table)
     if args.text_cache and Path(args.text_cache).exists():
         cache = torch.load(args.text_cache, map_location="cpu", weights_only=True)
         if args.prompt not in cache:
@@ -77,32 +99,38 @@ def main():
                      txt_ids=inp["txt_ids"], y=inp["vec"], timesteps=t_vec,
                      guidance=guidance_vec)
 
-    step(timesteps[0])  # warmup (kernel selection, cudnn autotune)
+    step(timesteps[0])  # warmup (kernel selection, cudnn autotune) — untimed
     torch.cuda.synchronize()
 
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+    sdpa_times = EventPairs()
+    attn_times = EventPairs()
+    step_times = EventPairs()
+    orig_sdpa = torch.nn.functional.scaled_dot_product_attention
+    torch.nn.functional.scaled_dot_product_attention = sdpa_times.wrap(orig_sdpa)
+    # layers.py binds `attention` at import time, so patch its local name
+    flux_layers.attention = attn_times.wrap(flux_attention)
+    try:
+        timed_step = step_times.wrap(step)
         for t_curr in timesteps[: args.steps]:
-            step(t_curr)
+            timed_step(t_curr)
         torch.cuda.synchronize()
+    finally:
+        torch.nn.functional.scaled_dot_product_attention = orig_sdpa
+        flux_layers.attention = flux_attention
 
-    events = prof.key_averages()
-    total = sum(cuda_time(e) for e in events)
-    attn = sum(cuda_time(e) for e in events
-               if any(m in e.key.lower() for m in ATTN_MARKERS))
+    total = step_times.total_ms()
     n_tokens = inp["img"].shape[1]
-
     result = {
         "name": args.name, "size": args.size, "img_tokens": n_tokens,
         "seq_len": n_tokens + inp["txt"].shape[1], "profiled_steps": args.steps,
-        "attention_share": attn / total if total else None,
-        "total_gpu_ms": total / 1000, "attn_gpu_ms": attn / 1000,
+        "attention_share": sdpa_times.total_ms() / total if total else None,
+        "attention_share_incl_rope": attn_times.total_ms() / total if total else None,
+        "step_ms": total / args.steps if args.steps else None,
+        "sdpa_calls_per_step": len(sdpa_times.pairs) // max(args.steps, 1),
+        "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30,
         "gpu": torch.cuda.get_device_name(0),
     }
     print(json.dumps(result, indent=2))
-    print("\ntop 15 kernels by GPU time:")
-    print(events.table(sort_by="self_device_time_total"
-                       if hasattr(events[0], "self_device_time_total")
-                       else "self_cuda_time_total", row_limit=15))
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
