@@ -1,22 +1,26 @@
-"""Attention-share measurement via CUDA events (EXECUTE_SERVER.md Phase 1.3).
+"""Attention-share measurement (EXECUTE_SERVER.md Phase 1.3) — sync-based.
 
-Reports what fraction of a denoise step's GPU time is spent in attention:
+Reports what fraction of a denoise step is spent in attention:
   - attention_share:           scaled_dot_product_attention only — the
                                quadratic term token merging shrinks
   - attention_share_incl_rope: the full flux attention() op (RoPE + SDPA
                                + reshape), which also scales with N
 
-torch.profiler/CUPTI ballooned host memory past this machine's watchdog
-(CUDA 13 driver stack), so attention calls are bracketed with CUDA events
-instead — no profiler, negligible overhead.
+Measurement: three passes of the same steps — (1) clean wall-clock
+baseline, (2) SDPA calls bracketed by synchronize + perf_counter,
+(3) attention() bracketed likewise. Shares divide the bracketed sums by
+the clean baseline. Per-call syncs inflate the *patched* pass (reported
+as sync_overhead_x) but the bracketed sums stay honest.
 
-Run at --size 1024 and --size 2048; the 2048 share decides whether the
-Phase-7 showcase is promoted to load-bearing (EXECUTE_SERVER.md Phase 1
-observations table).
+CUDA events and torch.profiler both return garbage in this sandbox
+(identical step_ms at 1024 and 2048), so only host wall clock across
+torch.cuda.synchronize() is used — the same method generate.py's
+paper timings rely on.
 """
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import torch
@@ -29,28 +33,34 @@ from flux.util import load_clip, load_flow_model, load_t5
 from generate import pack_img
 
 
-class EventPairs:
-    """Collects (start, end) CUDA event pairs around a wrapped callable."""
+class SyncTimer:
+    """Accumulates wall time of a callable, synchronized on both sides."""
 
     def __init__(self):
-        self.pairs = []
+        self.total_s = 0.0
+        self.calls = 0
 
     def wrap(self, fn):
-        pairs = self.pairs
-
         def timed(*args, **kwargs):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
             out = fn(*args, **kwargs)
-            end.record()
-            pairs.append((start, end))
+            torch.cuda.synchronize()
+            self.total_s += time.perf_counter() - t0
+            self.calls += 1
             return out
 
         return timed
 
-    def total_ms(self) -> float:
-        return sum(s.elapsed_time(e) for s, e in self.pairs)
+
+def run_steps(step, timesteps, n) -> float:
+    """Wall seconds per step across n steps, synchronized at the ends."""
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for t_curr in timesteps[:n]:
+        step(t_curr)
+    torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / n
 
 
 @torch.no_grad()
@@ -102,31 +112,38 @@ def main():
     step(timesteps[0])  # warmup (kernel selection, cudnn autotune) — untimed
     torch.cuda.synchronize()
 
-    sdpa_times = EventPairs()
-    attn_times = EventPairs()
-    step_times = EventPairs()
+    # pass 1: clean baseline, nothing patched
+    clean_s = run_steps(step, timesteps, args.steps)
+
+    # pass 2: SDPA bracketed (math.attention looks the function up at call
+    # time, so patching the torch.nn.functional attribute is sufficient)
+    sdpa_timer = SyncTimer()
     orig_sdpa = torch.nn.functional.scaled_dot_product_attention
-    torch.nn.functional.scaled_dot_product_attention = sdpa_times.wrap(orig_sdpa)
-    # layers.py binds `attention` at import time, so patch its local name
-    flux_layers.attention = attn_times.wrap(flux_attention)
+    torch.nn.functional.scaled_dot_product_attention = sdpa_timer.wrap(orig_sdpa)
     try:
-        timed_step = step_times.wrap(step)
-        for t_curr in timesteps[: args.steps]:
-            timed_step(t_curr)
-        torch.cuda.synchronize()
+        sdpa_pass_s = run_steps(step, timesteps, args.steps)
     finally:
         torch.nn.functional.scaled_dot_product_attention = orig_sdpa
+
+    # pass 3: full attention() bracketed (layers.py binds the name at import
+    # time, so patch its module-local reference)
+    attn_timer = SyncTimer()
+    flux_layers.attention = attn_timer.wrap(flux_attention)
+    try:
+        attn_pass_s = run_steps(step, timesteps, args.steps)
+    finally:
         flux_layers.attention = flux_attention
 
-    total = step_times.total_ms()
     n_tokens = inp["img"].shape[1]
     result = {
         "name": args.name, "size": args.size, "img_tokens": n_tokens,
         "seq_len": n_tokens + inp["txt"].shape[1], "profiled_steps": args.steps,
-        "attention_share": sdpa_times.total_ms() / total if total else None,
-        "attention_share_incl_rope": attn_times.total_ms() / total if total else None,
-        "step_ms": total / args.steps if args.steps else None,
-        "sdpa_calls_per_step": len(sdpa_times.pairs) // max(args.steps, 1),
+        "step_s_clean": clean_s,
+        "attention_share": (sdpa_timer.total_s / args.steps) / clean_s,
+        "attention_share_incl_rope": (attn_timer.total_s / args.steps) / clean_s,
+        "sdpa_calls_per_step": sdpa_timer.calls // max(args.steps, 1),
+        "sync_overhead_x": {"sdpa_pass": sdpa_pass_s / clean_s,
+                            "attn_pass": attn_pass_s / clean_s},
         "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30,
         "gpu": torch.cuda.get_device_name(0),
     }
