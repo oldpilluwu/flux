@@ -49,3 +49,51 @@ Data: `base_dev_1024` (8 prompts × 4 seeds, complete), `base_dev_512_smoke`
 
 32/32 images, ~0.63 s/step — matches Phase 1 calibration; this is the
 paired-comparison anchor for every Phase 4+ config.
+
+## Insights — what the numbers mean
+
+1. **The waste is real, and it is content-dependent.** FLUX spends identical
+   compute on every image patch at every step, but on an easy image half to
+   85% of patch-blocks are redundant at any moment, while on a hostile image
+   only ~19% are. Uniform-compute inference is provably leaving a large,
+   *prompt-dependent* amount of work on the table.
+
+2. **The 6× flat-vs-dense spread is the thesis of the paper.** Any *fixed*
+   token schedule must be tuned for the worst case (dense) and forfeits the
+   easy-image savings, or tuned for the average and damages hard images.
+   Only a method that measures redundancy per prompt, per step, per region
+   can collect the full margin. This is the empirical foundation of claim 1
+   (adaptive beats matched-compute uniform).
+
+3. **Where you look decides whether you can see.** Cosine similarity on the
+   noisy latent is blind (f ≈ 0.03–0.08 — the noise drowns the signal);
+   the same measurement on the model's own denoised estimate (x0) is sharp
+   and structured. Any merging metric must operate in x0 space — a design
+   choice now validated *before* the merge code exists, which is exactly
+   what the probe was for.
+
+4. **Redundancy has a shape in time.** Easy prompts stay mergeable across
+   the entire trajectory (no cliff, tmin unnecessary); the dense prompt
+   loses its headroom after the first ~2 steps (t≈0.9). And in the final
+   ~7 steps *every* prompt collapses to zero redundancy — fine detail is
+   being written and nothing is safe to skip. The tail must always run
+   full-res; the middle is where the money is.
+
+5. **Temporal beats spatial on easy content.** Between consecutive steps,
+   70–100% of tokens barely change their velocity through the middle of
+   generation. "Reuse last step's output for unchanged regions" (Part D,
+   leaf-level caching) may save more than merging does on easy prompts —
+   and the two compose: the quadtree's leaves are natural cache units.
+   Part D is promoted from optional to high-priority.
+
+6. **A schedule anomaly worth one look:** all three prompts show a sharp
+   one-step redundancy collapse at step ~18. Something discontinuous
+   happens in the sampling schedule there; Phase 3's anatomy should check
+   whether it is a schedule artifact or a real model behavior (it may
+   matter for where caching is safe).
+
+7. **What this does NOT yet show:** how much of the measured headroom is
+   *capturable* at acceptable quality — mergeable-by-cosine is not the same
+   as mergeable-without-visible-damage. That gap (measured headroom vs
+   quality-safe headroom) is precisely what Phase 3's oracle Pareto
+   quantifies, and why it runs before the real method is swept in Phase 4.
