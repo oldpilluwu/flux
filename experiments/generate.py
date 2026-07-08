@@ -126,6 +126,7 @@ def load_models(name: str, device: torch.device, text_cache: str | None) -> dict
     return models
 
 
+@torch.inference_mode()
 def run_config(models: dict, args: argparse.Namespace) -> None:
     device = torch.device("cuda")
     steps = args.steps or (4 if models["name"] == "flux-schnell" else 50)
