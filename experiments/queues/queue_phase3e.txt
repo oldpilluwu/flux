@@ -1,0 +1,30 @@
+# Phase 3e — x0-metric feedback fix: measure the REAL (deployable) method
+# Round-4 found the shippable x0 path collapsed (7.6x@tau.9 vs oracle 2.9x)
+# because the noise-corrected pred was leaking into the split metric. Fixed:
+# metric uses raw pred, update uses corrected. This queue re-tests the x0 path
+# (no oracle features) — the number that actually matters for the paper.
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase3e.txt > queue_phase3e.log 2>&1 &
+# prerequisites: results/base_dev_1024, text_cache.pt; pip install image-reward
+
+# 1. debug A/B on the fisherman, x0-driven, POST-FIX (~4 min)
+#    expect: compression no longer runs away; face coherent; seams visible in
+#    the hard config and feathered in the *_s* configs
+python debug_e2_smoke.py --out results/debug_e2_v4
+
+# 2. the REAL method (x0 metric, generate.py) at 1024, seeds 0 1, all 8 prompts.
+#    hard vs smooth at the two viable taus; tail-gated. THIS is the deployable
+#    result the oracle ceiling was a proxy for.
+python generate.py --name flux-dev --size 1024 --mode e2_full --tau 0.90 --merge-tmin 0.15 --seeds 0 1 --text-cache text_cache.pt --out results/ours_x0_t090_hard
+python generate.py --name flux-dev --size 1024 --mode e2_full --tau 0.90 --merge-tmin 0.15 --smooth-sigma 1.0 --seeds 0 1 --text-cache text_cache.pt --out results/ours_x0_t090_s10
+python generate.py --name flux-dev --size 1024 --mode e2_full --tau 0.95 --merge-tmin 0.15 --smooth-sigma 1.0 --seeds 0 1 --text-cache text_cache.pt --out results/ours_x0_t095_s10
+
+# 3. eval each vs the same-seed baseline (LPIPS + ImageReward delta + compression)
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/ours_x0_t090_hard
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/ours_x0_t090_s10
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/ours_x0_t095_s10
+
+# read (into PHASE3_NOTES):
+#   debug_e2_v4 compression ~ oracle (2-3x not 7x)   -> feedback fix confirmed
+#   ours_x0 lpips near oracle numbers                -> x0 method matches its ceiling
+#   ir_delta ~0                                      -> quality-preserving (divergence, not damage)
+#   smooth lpips < hard lpips, seams gone visually   -> ship smooth unmerge

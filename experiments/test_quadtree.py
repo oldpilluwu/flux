@@ -304,6 +304,21 @@ def test_e2_forward_and_denoise_integration():
                 vec=vec, timesteps=ts, guidance=3.5, adaptive=cfg)
         assert cfg.pop_log() == [n, n]
 
+        # x0-metric decoupling (feedback-loop fix): the FIRST merged step uses
+        # the raw latent (prev_pred is None), and its tree must be identical
+        # whether the noise correction is on or off — the correction only
+        # touches the latent update, never that step's split metric. (Later
+        # steps legitimately diverge because the corrected update changes the
+        # latent; that divergence is intended, so we only lock step 0.)
+        common = dict(tau=0.5, metric_source="x0", h_tok=h, w_tok=w)
+        logs = []
+        for nu in (True, False):
+            c = AdaptiveConfig(**common, noise_unmerge=nu)
+            denoise(model, img=img, img_ids=img_ids, txt=txt, txt_ids=txt_ids,
+                    vec=vec, timesteps=ts, guidance=3.5, adaptive=c)
+            logs.append(c.pop_log())
+        assert logs[0][0] == logs[1][0], "correction leaked into step-0 split metric"
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

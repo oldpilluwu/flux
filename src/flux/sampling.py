@@ -390,6 +390,13 @@ def denoise(
         if img_input_ids is not None:
             pred = pred[:, : img.shape[1]]
 
+        # RAW (pre-correction) pred feeds the next step's x0 metric. The noise
+        # correction subtracts (x_i - x_bar)/t, which flattens the x0 estimate
+        # within each existing leaf -> the metric would see homogeneity it
+        # created itself -> runaway over-merging. Decouple: metric uses raw,
+        # the latent update uses the corrected velocity.
+        pred_metric = pred
+
         if merge_plan is not None and adaptive.noise_unmerge:
             # add back the per-token noise-removal component of the velocity,
             # which the merged forward is structurally unable to produce
@@ -412,7 +419,7 @@ def denoise(
                             if merge_plan is not None and merge_plan.unmerge_ev else 0.0),
             )
 
-        prev_pred = pred
+        prev_pred = pred_metric
         img = img + (t_prev - t_curr) * pred
 
     return img

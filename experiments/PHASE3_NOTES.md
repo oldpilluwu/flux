@@ -104,3 +104,25 @@ boundary artifact and (b) a metric that conflates divergence with damage. Next:
 
 E1 remains the safe fallback if quality metrics also condemn E2 — but the images
 say that's now unlikely.
+
+## Round-4 finding: the x0-metric feedback loop (a real, deployable-path bug)
+
+debug_e2_v3 (x0-driven, no oracle) collapsed to 7.6x at tau=0.9 while the oracle
+(fixed features) held 2.9x at the same tau and stayed coherent. Cause: denoise()
+stored the *noise-corrected* pred as prev_pred, and the next step's metric is
+`feats = img - t*prev_pred`. Since the correction adds (x_i-x̄)/t,
+
+    x0_est_i = img_i - t*pred_corr_i = x0_raw_est_i - (x_i - x̄_leaf)
+
+i.e. the correction subtracts each leaf's own within-leaf variation from the x0
+estimate -> the split metric sees homogeneity IT CREATED -> over-merges ->
+more correction -> runaway collapse. This never hit the oracle path (oracle_feats
+bypasses the x0 metric), which is why oracle looked healthy while the shippable
+x0 method was broken.
+
+**Fix (sampling.denoise + debug harness):** the metric uses the RAW pred; only
+the latent update uses the corrected pred. `prev_pred = pred_metric` (raw).
+This decouples the loop; x0-driven compression should now track the oracle.
+Re-run: queue_phase3e (debug_e2_v4 visual + the REAL x0 method via generate.py,
+evaluated with LPIPS + ImageReward). Only after this does the seam A/B become
+readable, because v3's collapse was the feedback loop, not seams.

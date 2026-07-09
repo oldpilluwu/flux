@@ -78,9 +78,9 @@ def run(model, inp, timesteps, guidance, cfg_kwargs, h, w):
         pred = model(img=img, img_ids=inp["img_ids"], txt=inp["txt"],
                      txt_ids=inp["txt_ids"], y=inp["vec"],
                      timesteps=t_vec, guidance=guidance_vec, merge_plan=plan)
+        prev_pred = pred  # RAW pred feeds the x0 metric (see sampling.denoise)
         if plan is not None and cfg.noise_unmerge:
             pred = noise_corrected_unmerge(pred, img, plan, t_curr)
-        prev_pred = pred
         img = img + (t_prev - t_curr) * pred
     return img, leaf_maps, toks
 
