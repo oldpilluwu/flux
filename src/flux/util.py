@@ -668,8 +668,10 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", verbose: boo
             model = Flux(config.params).to(torch.bfloat16)
 
     print(f"Loading checkpoint: {ckpt_path}")
-    # load_sft doesn't support torch.device
-    sd = load_sft(ckpt_path, device=str(device))
+    # stream tensor-by-tensor instead of load_sft: buffering the whole 23.8 GB
+    # file in host RAM while a second copy lands on the GPU doubles the
+    # footprint of the load and can exceed system RAM
+    sd = load_sft_streaming(ckpt_path, device=str(device))
     sd = optionally_expand_state_dict(model, sd)
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     if verbose:

@@ -321,10 +321,13 @@ def denoise(
     # extra img tokens (sequence-wise)
     img_cond_seq: Tensor | None = None,
     img_cond_seq_ids: Tensor | None = None,
+    # adaptive token merging (flux.adaptive.quadtree.AdaptiveConfig)
+    adaptive=None,
 ):
     # this is ignored for schnell
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+    prev_pred = None
+    for step_idx, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         img_input = img
         img_input_ids = img_ids
@@ -336,6 +339,44 @@ def denoise(
             ), "You need to provide either both or neither of the sequence conditioning"
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
+
+        if adaptive is not None and adaptive.profile:
+            ev = {k: torch.cuda.Event(enable_timing=True) for k in ("step0", "plan", "fwd")}
+            ev["step0"].record()
+
+        merge_plan = None
+        if adaptive is not None and adaptive.should_merge(t_curr):
+            assert img_cond is None and img_cond_seq is None and img.shape[0] == 1, (
+                "adaptive merging assumes batch=1 and no conditioning tokens"
+            )
+            if adaptive.mode != "e2_full":
+                raise NotImplementedError(
+                    f"adaptive.mode={adaptive.mode!r}: only 'e2_full' is wired "
+                    "(E1 KV-only is TASK.md Step 4)"
+                )
+            from flux.adaptive.quadtree import build_merge_plan
+
+            if adaptive._plan_cache is not None and adaptive._plan_age < adaptive.plan_every:
+                merge_plan = adaptive._plan_cache  # amortized rebuild (IDEAS_TASKS A.6)
+                adaptive._plan_age += 1
+            else:
+                if adaptive.metric_source == "x0" and prev_pred is not None:
+                    # x0-estimate from the previous step's velocity (one step of
+                    # lag, zero extra cost); the very first step falls back to
+                    # the raw latent and correctly merges almost nothing
+                    feats = (img - t_curr * prev_pred)[0]
+                else:
+                    feats = img[0]
+                merge_plan = build_merge_plan(feats, img_ids[0], adaptive)
+                adaptive._plan_cache = merge_plan
+                adaptive._plan_age = 1
+            adaptive.log_tokens(merge_plan.n_leaves)
+        elif adaptive is not None:
+            adaptive.log_tokens(img.shape[1])
+
+        if adaptive is not None and adaptive.profile:
+            ev["plan"].record()
+
         pred = model(
             img=img_input,
             img_ids=img_input_ids,
@@ -344,10 +385,27 @@ def denoise(
             y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
+            merge_plan=merge_plan,
         )
         if img_input_ids is not None:
             pred = pred[:, : img.shape[1]]
 
+        if adaptive is not None and adaptive.profile:
+            ev["fwd"].record()
+            torch.cuda.synchronize()
+            adaptive.log_timing(
+                step=step_idx,
+                t=t_curr,
+                n_leaves=merge_plan.n_leaves if merge_plan is not None else img.shape[1],
+                plan_ms=ev["step0"].elapsed_time(ev["plan"]),
+                fwd_ms=ev["plan"].elapsed_time(ev["fwd"]),
+                merge_ms=(merge_plan.merge_ev[0].elapsed_time(merge_plan.merge_ev[1])
+                          if merge_plan is not None and merge_plan.merge_ev else 0.0),
+                unmerge_ms=(merge_plan.unmerge_ev[0].elapsed_time(merge_plan.unmerge_ev[1])
+                            if merge_plan is not None and merge_plan.unmerge_ev else 0.0),
+            )
+
+        prev_pred = pred
         img = img + (t_prev - t_curr) * pred
 
     return img

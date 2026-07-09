@@ -11,9 +11,12 @@ Server edition (EXECUTE_SERVER.md §0.1/§0.3):
   - ``--text-cache`` optionally loads precomputed T5/CLIP encodings
     (see precompute_text.py) and skips loading the text encoders entirely
 
-Adaptive modes (``e1_kv`` / ``e2_full``) are Phase-4 work: the argument
-surface is final so queue files written now stay valid, but selecting them
-exits with a clear error until flux.adaptive lands.
+Adaptive modes: ``e2_full`` (quadtree merge -> blocks -> unmerge, TASK.md
+Step 3) is live; ``e1_kv`` exits with a clear error until TASK.md Step 4
+lands. ``--uniform-size`` forces flat s x s leaves (the matched-compute
+baseline of IDEAS_TASKS A.2); ``--profile`` records per-step
+plan/merge/fwd/unmerge CUDA-event timings into meta.json (budgeting-grade
+on this virtualized instance — see PHASE1_NOTES.md).
 """
 
 import argparse
@@ -59,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop-attn", action="store_true", help="proportional attention (E1 only)")
     p.add_argument("--pe-mode", choices=["centroid", "nearest", "corner"], default="centroid")
     p.add_argument("--unweighted-unmerge", action="store_true")
+    p.add_argument("--base", type=int, default=8, help="quadtree base leaf size")
+    p.add_argument("--uniform-size", type=int, default=None,
+                   help="force flat s x s leaves (matched-compute baseline, IDEAS_TASKS A.2)")
+    p.add_argument("--plan-every", type=int, default=1,
+                   help="rebuild the merge plan every k merged steps (amortization ablation)")
+    p.add_argument("--profile", action="store_true",
+                   help="per-step plan/merge/fwd/unmerge CUDA-event timings into meta.json")
     return p
 
 
@@ -126,6 +136,24 @@ def load_models(name: str, device: torch.device, text_cache: str | None) -> dict
     return models
 
 
+def make_adaptive(args: argparse.Namespace):
+    """Fresh per-image AdaptiveConfig (the plan cache and logs must not leak
+    across images). Returns None for baseline mode."""
+    if args.mode not in ADAPTIVE_MODES:
+        return None
+    from flux.adaptive.quadtree import AdaptiveConfig
+    # token grid AFTER 2x2 packing: 64x64 = 4096 tokens for 1024 px
+    h_tok = w_tok = math.ceil(args.size / 16)
+    return AdaptiveConfig(
+        mode=args.mode, tau=args.tau, metric_source=args.metric_source,
+        merge_tmin=args.merge_tmin, scale_axis=args.scale_axis,
+        prop_attn=args.prop_attn, base=args.base, h_tok=h_tok, w_tok=w_tok,
+        pe_mode=args.pe_mode, weighted_unmerge=not args.unweighted_unmerge,
+        uniform_size=args.uniform_size, plan_every=args.plan_every,
+        profile=args.profile,
+    )
+
+
 @torch.inference_mode()
 def run_config(models: dict, args: argparse.Namespace) -> None:
     device = torch.device("cuda")
@@ -133,10 +161,9 @@ def run_config(models: dict, args: argparse.Namespace) -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.mode in ADAPTIVE_MODES:
+    if args.mode == "e1_kv":
         raise SystemExit(
-            f"--mode {args.mode} is Phase-4 work: flux.adaptive is not implemented yet. "
-            "Only --mode baseline runs today.")
+            "--mode e1_kv is TASK.md Step 4 — not wired yet. e2_full and baseline run today.")
 
     prompts = [l.strip() for l in open(args.prompts, encoding="utf-8") if l.strip()]
     if args.limit:
@@ -152,7 +179,9 @@ def run_config(models: dict, args: argparse.Namespace) -> None:
         x = get_noise(1, args.size, args.size, device, torch.bfloat16, 0)
         inp = prepare_inp(models, x, prompts[0])
         ts = get_schedule(2, inp["img"].shape[1], shift=(models["name"] != "flux-schnell"))
-        denoise(models["model"], **inp, timesteps=ts, guidance=args.guidance)
+        # warm up the adaptive path too (index_add/bincount kernels)
+        denoise(models["model"], **inp, timesteps=ts, guidance=args.guidance,
+                adaptive=make_adaptive(args))
         torch.cuda.synchronize()
 
     for pi, prompt in enumerate(prompts):
@@ -166,10 +195,12 @@ def run_config(models: dict, args: argparse.Namespace) -> None:
             inp = prepare_inp(models, x, prompt)
             timesteps = get_schedule(steps, inp["img"].shape[1],
                                      shift=(models["name"] != "flux-schnell"))
+            adaptive = make_adaptive(args)
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            x = denoise(models["model"], **inp, timesteps=timesteps, guidance=args.guidance)
+            x = denoise(models["model"], **inp, timesteps=timesteps, guidance=args.guidance,
+                        adaptive=adaptive)
             torch.cuda.synchronize()
             dt = time.perf_counter() - t0
             peak_gb = torch.cuda.max_memory_allocated() / 2**30
@@ -181,16 +212,26 @@ def run_config(models: dict, args: argparse.Namespace) -> None:
             x = rearrange(x[0], "c h w -> h w c")
             Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy()).save(out_dir / fname)
 
-            records.append({
+            rec = {
                 "prompt": prompt, "seed": seed, "file": fname,
                 "mode": args.mode, "size": args.size, "steps": steps,
                 "n_tokens": inp["img"].shape[1],
                 "denoise_s": dt, "s_per_step": dt / steps, "peak_gb": peak_gb,
-            })
+            }
+            extra = ""
+            if adaptive is not None:
+                rec["tau"] = args.tau
+                rec["tokens_per_step"] = adaptive.pop_log()
+                mean_tok = sum(rec["tokens_per_step"]) / len(rec["tokens_per_step"])
+                rec["compression"] = rec["n_tokens"] / mean_tok
+                extra = f"  {rec['compression']:.2f}x tokens"
+                if args.profile:
+                    rec["timings"] = adaptive.pop_timings()
+            records.append(rec)
             # dump after every image: a dead queue costs 0 completed records
             json.dump(records, open(meta_path, "w", encoding="utf-8"), indent=2)
             print(f"[{args.mode}] {out_dir.name}/{fname}  {dt:.2f}s "
-                  f"({dt / steps:.2f} s/step)  {peak_gb:.2f}GB")
+                  f"({dt / steps:.2f} s/step)  {peak_gb:.2f}GB{extra}")
 
 
 def main():

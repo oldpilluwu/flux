@@ -1,0 +1,34 @@
+# Phase 3 — Part B redundancy anatomy (EXECUTE_SERVER.md Phase 3, IDEAS_TASKS Part B)
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase3.txt > queue_phase3.log 2>&1 &
+# prerequisites: text_cache.pt (precompute_text.py), results/base_dev_1024 complete (Phase 2)
+
+# smoke: the new quadtree/E2 code path, one image @512/28 — fail fast, not at job 3 of the night
+python generate.py --name flux-dev --size 512 --steps 28 --seeds 0 --limit 1 --text-cache text_cache.pt --mode e2_full --tau 0.8 --out results/smoke_e2_512
+
+# B.1 — record full-res trajectories (8 prompts, seed 0; ~25 min, ~800 MB — server disk, never rsync)
+python record_trajectory.py --out results/traj --text-cache text_cache.pt
+
+# B.2 — spatial ceiling: per-step oracle pred error, then end-to-end oracle Pareto (6 tau x 8 prompts)
+python oracle_spatial.py --traj results/traj --mode perstep --out results/anatomy_spatial
+python oracle_spatial.py --traj results/traj --mode e2e --out results/anatomy_spatial
+
+# B.3 — temporal ceiling: ideal-cache simulation, eps in {0.01, 0.02, 0.05, 0.1} (full-cost replay)
+python oracle_temporal.py --traj results/traj --out results/anatomy_temporal
+
+# B.4 — depth profile: per-block residual contribution at recorded states
+python oracle_depth.py --traj results/traj --out results/anatomy_depth
+
+# paired eval vs the Phase-2 baseline (GPU; LPIPS feeds C_spatial / C_temp)
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t060
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t070
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t080
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t085
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t090
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t095
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_temporal/eps010
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_temporal/eps020
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_temporal/eps050
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_temporal/eps100
+
+# then locally (after rsync of results/, excluding results/traj):
+#   python plot_anatomy.py   -> results/anatomy_figs + anatomy_money_table.md + the B.6 gate

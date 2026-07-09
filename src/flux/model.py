@@ -90,6 +90,7 @@ class Flux(nn.Module):
         timesteps: Tensor,
         y: Tensor,
         guidance: Tensor | None = None,
+        merge_plan=None,  # flux.adaptive.quadtree.MergePlan — E2 full merge/unmerge
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
@@ -104,6 +105,22 @@ class Flux(nn.Module):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
+        if merge_plan is not None:
+            # merge once after img_in; all blocks run on the short sequence;
+            # pe below is built from the leaf centroid ids, exact under RoPE
+            from flux.adaptive.quadtree import merge_tokens
+
+            if merge_plan.profile:
+                ev = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+                ev[0].record()
+            img_full = img
+            img = merge_tokens(img, merge_plan)
+            img_merged_in = img
+            if merge_plan.profile:
+                ev[1].record()
+                merge_plan.merge_ev = ev
+            img_ids = merge_plan.leaf_ids[None].expand(img.shape[0], -1, -1)
+
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
@@ -114,6 +131,19 @@ class Flux(nn.Module):
         for block in self.single_blocks:
             img = block(img, vec=vec, pe=pe)
         img = img[:, txt.shape[1] :, ...]
+
+        if merge_plan is not None:
+            # broadcast the merged update back so final_layer/unpack always
+            # see the full dense token grid (PLAN.md §5)
+            from flux.adaptive.quadtree import unmerge_delta
+
+            if merge_plan.profile:
+                ev = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+                ev[0].record()
+            img = unmerge_delta(img_full, img_merged_in, img, merge_plan)
+            if merge_plan.profile:
+                ev[1].record()
+                merge_plan.unmerge_ev = ev
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
