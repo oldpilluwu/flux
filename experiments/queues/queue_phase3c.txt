@@ -1,0 +1,22 @@
+# Phase 3c — E2's FAIR oracle ceiling with the low-t tail kept full-res
+# Round 2 found: the noise correction halves mid-trajectory velocity error,
+# but (x-x_bar)/t amplifies residual inhomogeneity as t->0, so the final
+# steps re-corrupt the image (woven grid in debug_e2_v2/t080.png). This run
+# gates the tail full-res (merge_tmin=0.15) to get E2's best achievable
+# oracle LPIPS before the E1-vs-E2 fork is decided.
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase3c.txt > queue_phase3c.log 2>&1 &
+# prerequisites: results/traj, results/base_dev_1024
+
+# tail-gated oracle e2e into a separate dir (does not clobber the ungated run)
+python oracle_spatial.py --traj results/traj --mode e2e --merge-tmin 0.15 --out results/anatomy_spatial_tmin15
+
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t080
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t085
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t090
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t095
+
+# verdict rule (into PHASE3 notes):
+#   tail-gated e2e_t095 LPIPS <= ~0.15  -> E2 usable at low compression; keep, sweep tmin
+#   still >> 0.2 even at t095/1.9x       -> E2 broadcast unmerge is the ceiling;
+#                                           pivot to E1 (KV-only, queries full-res,
+#                                           no unmerge) per PLAN.md / TASK.md Step 4
