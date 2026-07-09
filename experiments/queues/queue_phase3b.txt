@@ -1,0 +1,27 @@
+# Phase 3b — rerun the spatial oracle with the noise-corrected unmerge
+# (the round-1 spatial results measured the RAW broadcast unmerge, which is
+#  structurally unable to produce per-token noise removal — LPIPS ~0.85 even
+#  with oracle splits; kept as the ablation record in anatomy_spatial_raw)
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase3b.txt > queue_phase3b.log 2>&1 &
+# prerequisites: queue_phase3 done (trajectories exist), base_dev_1024 restored
+
+# archive round 1 as the no-correction ablation (idempotent)
+[ -d results/anatomy_spatial_raw ] || mv results/anatomy_spatial results/anatomy_spatial_raw
+
+# debug grid round 2: raw reproducer vs corrected, one prompt @512/28 (~4 min)
+python debug_e2_smoke.py --out results/debug_e2_v2
+
+# B.2 rerun: perstep now logs raw AND corrected error; e2e runs corrected
+python oracle_spatial.py --traj results/traj --mode perstep --out results/anatomy_spatial
+python oracle_spatial.py --traj results/traj --mode e2e --out results/anatomy_spatial
+
+# paired eval of the corrected oracle generations
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t060
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t070
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t080
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t085
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t090
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial/e2e_t095
+
+# temporal + depth from round 1 remain valid (no merged forwards involved)
+# then locally: python plot_anatomy.py   -> corrected Pareto + unmerge-ablation figure

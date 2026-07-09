@@ -27,7 +27,11 @@ import torch
 from einops import rearrange
 from PIL import Image
 
-from flux.adaptive.quadtree import AdaptiveConfig, build_merge_plan
+from flux.adaptive.quadtree import (
+    AdaptiveConfig,
+    build_merge_plan,
+    noise_corrected_unmerge,
+)
 from flux.sampling import denoise, unpack
 from flux.util import load_ae, load_flow_model
 
@@ -76,15 +80,20 @@ def perstep(model, rec, dev, args, out_dir: Path):
         for tau in args.taus:
             pred_m = model(img=img_t, img_ids=dev["img_ids"], txt=dev["txt"],
                            txt_ids=dev["txt_ids"], y=dev["vec"], timesteps=t_vec,
-                           guidance=guidance_vec, merge_plan=plans[tau])[0].float()
-            rel = ((pred_m - pred_full).norm(dim=-1)
-                   / pred_full.norm(dim=-1).clamp_min(1e-6))
+                           guidance=guidance_vec, merge_plan=plans[tau])
+            # raw broadcast unmerge vs the noise-corrected velocity (+(x-x_bar)/t)
+            pred_c = noise_corrected_unmerge(pred_m, img_t, plans[tau], ts[si])
+            den = pred_full.norm(dim=-1).clamp_min(1e-6)
+            rel = (pred_m[0].float() - pred_full).norm(dim=-1) / den
+            rel_nc = (pred_c[0].float() - pred_full).norm(dim=-1) / den
             rows.append({
                 "prompt_idx": rec["prompt_idx"], "step": si, "t": ts[si], "tau": tau,
                 "n_leaves": plans[tau].n_leaves,
                 "compression": n / plans[tau].n_leaves,
                 "rel_mean": rel.mean().item(),
                 "rel_p95": rel.quantile(0.95).item(),
+                "nc_rel_mean": rel_nc.mean().item(),
+                "nc_rel_p95": rel_nc.quantile(0.95).item(),
             })
         print(f"perstep {stem} step {si}: done")
 

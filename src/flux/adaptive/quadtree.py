@@ -49,6 +49,7 @@ class AdaptiveConfig:
     w_tok: int = 64
     pe_mode: str = "centroid"        # "centroid" | "nearest" | "corner" (A.4)
     weighted_unmerge: bool = True
+    noise_unmerge: bool = True       # analytic (x - x_bar)/t velocity correction
     # Part-0 extensions (IDEAS_TASKS 0.1)
     oracle_feats: torch.Tensor | None = None  # (N, D) overrides metric source (Part B)
     uniform_size: int | None = None           # force all leaves to s x s (baselines)
@@ -214,6 +215,23 @@ def unmerge_delta(x_full: torch.Tensor, merged_in: torch.Tensor,
     delta = (merged_out - merged_in)[:, plan.assign]          # (B, N, D)
     delta = delta * plan.weights[None, :, None].to(delta.dtype)
     return x_full + delta
+
+
+def noise_corrected_unmerge(pred: torch.Tensor, img: torch.Tensor,
+                            plan: MergePlan, t_curr: float) -> torch.Tensor:
+    """Flow-matching-aware output correction (the E2 confetti fix).
+
+    v = eps - x0 and x_t = (1-t) x0 + t eps, so within an x0-homogeneous leaf
+    the true per-token velocity deviates from the leaf mean by exactly
+    (x_i - x_bar_leaf) / t — the per-token noise-removal component that a
+    merged forward is structurally unable to produce. Reconstruct it
+    analytically from the input latent tokens: zero extra compute, exact when
+    the leaf is x0-homogeneous (which is precisely what the split metric
+    selects for). 1-token leaves get a zero correction automatically.
+
+    pred, img: (B, N, D) velocity and pre-step latent tokens."""
+    xbar = merge_tokens(img.float(), plan)[:, plan.assign]
+    return (pred.float() + (img.float() - xbar) / max(t_curr, 1e-4)).to(pred.dtype)
 
 
 def merge_kv(t: torch.Tensor, plan: MergePlan, n_txt: int) -> torch.Tensor:

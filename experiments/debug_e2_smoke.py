@@ -1,17 +1,20 @@
-"""Debug the noisy-region artifact in the E2 smoke test.
+"""Debug grid for the E2 confetti artifact.
 
-Hypothesis (PHASE2_NOTES insight 4, per-region form): a leaf merged through
-the FINAL steps receives only the leaf-mean velocity, so its constituents'
-individual noise is never subtracted — flat regions merge hardest, stay
-merged to t=0, and come out noisy. Controls in this grid:
+Round-1 finding (see PHASE3 notes): the artifact is NOT a plumbing bug
+(ident_u1 matched baseline) and NOT the merged tail (tmin didn't cure it).
+Mechanism: v = eps - x0, so within an x0-homogeneous leaf the true per-token
+velocity deviates from the broadcast leaf mean by (x_i - x_bar)/t — the
+noise-removal component a merged forward cannot produce. The oracle perstep
+probe confirmed 30-77% velocity error scaling with merged fraction.
 
-  baseline     no adaptive path at all
-  ident_u1     uniform_size=1 identity plan — merge/unmerge/PE plumbing active
-               but mathematically a no-op; must match baseline (bug detector)
-  t080         the failing smoke config
-  t080_tmin02  same + last ~steps with t<0.2 full-res  } if these cure the
-  t080_tmin04  same, more of the tail full-res          } noise -> hypothesis
-  t090         stricter tau — distinguishes "metric too loose" from "tail"
+Round-2 grid tests the analytic fix (quadtree.noise_corrected_unmerge):
+
+  baseline     no adaptive path
+  ident_u1     identity plan — plumbing control, must match baseline
+  t080_raw     tau .8 WITHOUT the correction — the confetti reproducer
+  t080         tau .8 with the (x - x_bar)/t correction
+  t080_tmin02  correction + full-res tail (t < 0.2)
+  t090         correction + stricter tau
 
 Outputs per config into --out: the image, tokens/step, per-step leaf-size
 maps (panel PNG + final-step map beside the image), and a summary.json with
@@ -30,7 +33,11 @@ import torch
 from einops import rearrange
 from PIL import Image
 
-from flux.adaptive.quadtree import AdaptiveConfig, build_merge_plan
+from flux.adaptive.quadtree import (
+    AdaptiveConfig,
+    build_merge_plan,
+    noise_corrected_unmerge,
+)
 from flux.sampling import get_noise, get_schedule, unpack
 from flux.util import load_ae, load_flow_model
 
@@ -39,9 +46,9 @@ from generate import pack_img
 CONFIGS = [
     ("baseline", None),
     ("ident_u1", dict(uniform_size=1)),
-    ("t080", dict(tau=0.8)),
+    ("t080_raw", dict(tau=0.8, noise_unmerge=False)),   # the confetti reproducer
+    ("t080", dict(tau=0.8)),                            # + (x - x_bar)/t correction
     ("t080_tmin02", dict(tau=0.8, merge_tmin=0.2)),
-    ("t080_tmin04", dict(tau=0.8, merge_tmin=0.4)),
     ("t090", dict(tau=0.9)),
 ]
 
@@ -68,6 +75,8 @@ def run(model, inp, timesteps, guidance, cfg_kwargs, h, w):
         pred = model(img=img, img_ids=inp["img_ids"], txt=inp["txt"],
                      txt_ids=inp["txt_ids"], y=inp["vec"],
                      timesteps=t_vec, guidance=guidance_vec, merge_plan=plan)
+        if plan is not None and cfg.noise_unmerge:
+            pred = noise_corrected_unmerge(pred, img, plan, t_curr)
         prev_pred = pred
         img = img + (t_prev - t_curr) * pred
     return img, leaf_maps, toks

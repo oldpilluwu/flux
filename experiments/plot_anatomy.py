@@ -69,18 +69,20 @@ def plot_spatial(spatial_dir: Path, figdir: Path, money: dict):
     if perstep:
         rows = [r for f in perstep for r in json.load(open(f, encoding="utf-8"))]
         df = pd.DataFrame(rows)
+        # operative metric: the noise-corrected velocity error when logged
+        metric = "nc_rel_mean" if "nc_rel_mean" in df.columns else "rel_mean"
 
         # per-step tolerable compression: max oracle compression whose merged
-        # pred stays within rel_mean <= thr of the full-res pred
+        # pred stays within metric <= thr of the full-res pred
         fig, axes = plt.subplots(1, 2, figsize=(11, 4))
         for ax, thr in zip(axes, (0.05, 0.10)):
             for pi, g in df.groupby("prompt_idx"):
-                tol = (g[g.rel_mean <= thr].groupby("step")["compression"].max()
+                tol = (g[g[metric] <= thr].groupby("step")["compression"].max()
                        .reindex(sorted(g.step.unique()), fill_value=1.0))
                 ax.plot(tol.index, tol.values, marker=".", label=label(pi))
             ax.axvline(18, color="grey", ls=":", lw=1)  # PHASE2 step-18 anomaly
             ax.set(xlabel="step", ylabel="tolerable compression",
-                   title=f"oracle splits, rel err <= {thr}")
+                   title=f"oracle splits, {metric} <= {thr}")
             ax.set_yscale("log", base=2)
         axes[0].legend(fontsize=7)
         fig.tight_layout()
@@ -88,17 +90,31 @@ def plot_spatial(spatial_dir: Path, figdir: Path, money: dict):
         plt.close(fig)
 
         # rel-error heatmap (tau x step), mean over prompts
-        piv = df.pivot_table(index="tau", columns="step", values="rel_mean")
+        piv = df.pivot_table(index="tau", columns="step", values=metric)
         fig, ax = plt.subplots(figsize=(8, 3.5))
         im = ax.imshow(piv.values, aspect="auto", cmap="viridis",
                        extent=[piv.columns.min(), piv.columns.max(),
                                piv.index.max(), piv.index.min()])
-        fig.colorbar(im, label="rel pred error (mean over prompts)")
+        fig.colorbar(im, label=f"{metric} (mean over prompts)")
         ax.set(xlabel="step", ylabel="tau", title="oracle merged-pred error")
         fig.tight_layout()
         fig.savefig(figdir / "spatial_relerr_heatmap.png", dpi=150)
         plt.close(fig)
-        print(f"spatial perstep: {len(perstep)} trajectories")
+
+        # the unmerge ablation figure: raw broadcast vs noise-corrected
+        if "nc_rel_mean" in df.columns:
+            g = df.groupby("tau")[["compression", "rel_mean", "nc_rel_mean"]].mean()
+            fig, ax = plt.subplots(figsize=(5, 4))
+            ax.plot(g.compression, g.rel_mean, "o--", label="raw broadcast unmerge")
+            ax.plot(g.compression, g.nc_rel_mean, "o-",
+                    label="+ (x - x_bar)/t correction")
+            ax.set(xlabel="oracle compression", ylabel="rel velocity error",
+                   title="why merged velocity needs the noise term")
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            fig.savefig(figdir / "spatial_unmerge_ablation.png", dpi=150)
+            plt.close(fig)
+        print(f"spatial perstep: {len(perstep)} trajectories (metric: {metric})")
     else:
         print("skip spatial perstep (no perstep_*.json)")
 

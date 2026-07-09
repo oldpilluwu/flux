@@ -15,6 +15,7 @@ from flux.adaptive.quadtree import (
     build_uniform_plan,
     merge_kv,
     merge_tokens,
+    noise_corrected_unmerge,
     prop_attn_bias,
     unmerge_delta,
 )
@@ -180,6 +181,32 @@ def test_x0_first_step_fallback_shape():
     plan_invariants(plan)
     assert plan.n_leaves == 64  # 4096 tokens -> 64 leaves of 8x8
     assert plan.leaf_size_map(H, W).unique().tolist() == [8]
+
+
+def test_noise_corrected_unmerge_is_exact_under_homogeneity():
+    # v = eps - x0 and x_t = (1-t) x0 + t eps: when x0 is constant within each
+    # leaf, broadcasting the leaf-mean velocity and adding (x - x_bar)/t must
+    # reconstruct the true per-token velocity EXACTLY — the confetti fix
+    torch.manual_seed(7)
+    t = 0.7
+    # x0 constant on 16x16 macro-cells -> every 8x8 leaf is x0-homogeneous
+    x0 = (torch.randn(4, 4, D).repeat_interleave(16, 0).repeat_interleave(16, 1)
+          .reshape(N, D))
+    eps = torch.randn(N, D)
+    x_t = (1 - t) * x0 + t * eps
+    v_true = eps - x0
+    plan = build_merge_plan(x0, IDS, AdaptiveConfig(tau=0.99, h_tok=H, w_tok=W))
+    assert (plan.counts > 1).all(), "test needs every leaf actually merged"
+    # what an ideal merged forward outputs: the leaf-mean velocity, broadcast
+    v_bar = merge_tokens(v_true[None], plan)[:, plan.assign]
+    raw_err = (v_bar[0] - v_true).norm() / v_true.norm()
+    v_corr = noise_corrected_unmerge(v_bar, x_t[None], plan, t)
+    corr_err = (v_corr[0] - v_true).norm() / v_true.norm()
+    assert raw_err > 0.5, f"raw broadcast should be badly wrong, got {raw_err:.3f}"
+    assert corr_err < 1e-5, f"corrected must be exact, got {corr_err:.2e}"
+    # 1-token leaves: correction is identically zero (x_i == x_bar)
+    p1 = build_uniform_plan(1, IDS, AdaptiveConfig(h_tok=H, w_tok=W))
+    assert torch.allclose(noise_corrected_unmerge(v_bar, x_t[None], p1, t), v_bar)
 
 
 def test_e2_forward_and_denoise_integration():

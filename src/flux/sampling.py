@@ -390,6 +390,13 @@ def denoise(
         if img_input_ids is not None:
             pred = pred[:, : img.shape[1]]
 
+        if merge_plan is not None and adaptive.noise_unmerge:
+            # add back the per-token noise-removal component of the velocity,
+            # which the merged forward is structurally unable to produce
+            from flux.adaptive.quadtree import noise_corrected_unmerge
+
+            pred = noise_corrected_unmerge(pred, img, merge_plan, t_curr)
+
         if adaptive is not None and adaptive.profile:
             ev["fwd"].record()
             torch.cuda.synchronize()
