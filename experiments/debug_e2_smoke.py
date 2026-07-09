@@ -7,14 +7,17 @@ velocity deviates from the broadcast leaf mean by (x_i - x_bar)/t — the
 noise-removal component a merged forward cannot produce. The oracle perstep
 probe confirmed 30-77% velocity error scaling with merged fraction.
 
-Round-2 grid tests the analytic fix (quadtree.noise_corrected_unmerge):
+Round-3 grid: the images are already coherent (correction + tail gate); the
+residual defect is leaf-boundary tile seams in flat regions. This grid A/Bs
+the smooth (feathered) unmerge (quadtree.smooth_sigma) that ToMeSD sidesteps
+via soft matching. Compare *_s* vs the hard-unmerge control at matched tau:
 
-  baseline     no adaptive path
-  ident_u1     identity plan — plumbing control, must match baseline
-  t080_raw     tau .8 WITHOUT the correction — the confetti reproducer
-  t080         tau .8 with the (x - x_bar)/t correction
-  t080_tmin02  correction + full-res tail (t < 0.2)
-  t090         correction + stricter tau
+  baseline           no adaptive path
+  t090_tmin15        hard unmerge — the seam control
+  t090_tmin15_s08    + feather sigma 0.8
+  t090_tmin15_s15    + feather sigma 1.5
+  t095_tmin15        gentler tau, hard unmerge
+  t095_tmin15_s10    + feather sigma 1.0
 
 Outputs per config into --out: the image, tokens/step, per-step leaf-size
 maps (panel PNG + final-step map beside the image), and a summary.json with
@@ -45,11 +48,11 @@ from generate import pack_img
 
 CONFIGS = [
     ("baseline", None),
-    ("ident_u1", dict(uniform_size=1)),
-    ("t080_raw", dict(tau=0.8, noise_unmerge=False)),   # the confetti reproducer
-    ("t080", dict(tau=0.8)),                            # + (x - x_bar)/t correction
-    ("t080_tmin02", dict(tau=0.8, merge_tmin=0.2)),
-    ("t090", dict(tau=0.9)),
+    ("t090_tmin15", dict(tau=0.9, merge_tmin=0.15)),                  # hard unmerge (seams)
+    ("t090_tmin15_s08", dict(tau=0.9, merge_tmin=0.15, smooth_sigma=0.8)),
+    ("t090_tmin15_s15", dict(tau=0.9, merge_tmin=0.15, smooth_sigma=1.5)),
+    ("t095_tmin15", dict(tau=0.95, merge_tmin=0.15)),
+    ("t095_tmin15_s10", dict(tau=0.95, merge_tmin=0.15, smooth_sigma=1.0)),
 ]
 
 

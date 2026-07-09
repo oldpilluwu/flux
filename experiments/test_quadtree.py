@@ -209,6 +209,51 @@ def test_noise_corrected_unmerge_is_exact_under_homogeneity():
     assert torch.allclose(noise_corrected_unmerge(v_bar, x_t[None], p1, t), v_bar)
 
 
+def test_smooth_unmerge():
+    from flux.adaptive.quadtree import _smooth_delta_field
+    # sigma=0 short-circuits to identity
+    feats = torch.randn(N, D)
+    plan0 = build_merge_plan(feats, IDS, AdaptiveConfig(tau=0.0, h_tok=H, w_tok=W))
+    assert plan0.smooth_sigma == 0.0
+    d = torch.randn(1, N, 8)
+    assert torch.equal(_smooth_delta_field(d, plan0), d)
+
+    # all-8x8 plan, smoothing on: a spatially CONSTANT delta field is unchanged
+    # (blur of a constant is the constant; feather only moves boundary values)
+    cfg = AdaptiveConfig(tau=-1.0, h_tok=H, w_tok=W, smooth_sigma=1.0)
+    plan = build_merge_plan(feats, IDS, cfg)
+    assert plan.smooth_sigma == 1.0 and (plan.counts == 64).all()
+    const = torch.ones(1, N, 8) * 2.5
+    assert torch.allclose(_smooth_delta_field(const, plan), const, atol=1e-5)
+
+    # a boundary between two leaves gets feathered (values change only there)
+    d = torch.zeros(1, N, 1)
+    dg = d.view(1, H, W, 1)
+    dg[:, :, : W // 2] = 1.0            # left half delta 1, right half 0
+    d = dg.reshape(1, N, 1)
+    out = _smooth_delta_field(d, plan).view(H, W)
+    col = W // 2
+    assert not torch.allclose(out[:, col - 1: col + 1], d.view(H, W)[:, col - 1: col + 1])
+    assert torch.allclose(out[:, 0], torch.ones(H), atol=1e-3)   # far interior intact
+    assert torch.allclose(out[:, -1], torch.zeros(H), atol=1e-3)
+
+    # 1x1 leaves (detail regions) are protected: alpha=0 -> untouched
+    p1 = build_uniform_plan(1, IDS, AdaptiveConfig(h_tok=H, w_tok=W, smooth_sigma=2.0))
+    p1.smooth_sigma = 2.0
+    rnd = torch.randn(1, N, 4)
+    assert torch.allclose(_smooth_delta_field(rnd, p1), rnd, atol=1e-6)
+
+    # full unmerge with smoothing stays finite and differs from the hard
+    # unmerge on the SAME tree (sigma 0 vs 1)
+    plan_hard = build_merge_plan(feats, IDS, AdaptiveConfig(tau=-1.0, h_tok=H, w_tok=W))
+    mi = merge_tokens(torch.randn(1, N, 8), plan)
+    mo = mi + torch.randn_like(mi)
+    xf = torch.randn(1, N, 8)
+    hard = unmerge_delta(xf, mi, mo, plan_hard)
+    smooth = unmerge_delta(xf, mi, mo, plan)
+    assert smooth.isfinite().all() and not torch.allclose(hard, smooth)
+
+
 def test_e2_forward_and_denoise_integration():
     # tiny Flux on CPU: exercises Flux.forward's merge/unmerge path and
     # denoise(adaptive=...) wiring — shapes, plan logging, x0 fallback

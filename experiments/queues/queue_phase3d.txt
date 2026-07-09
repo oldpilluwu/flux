@@ -1,0 +1,27 @@
+# Phase 3d — smooth unmerge (seam fix) + ImageReward (divergence-vs-damage)
+# Two questions this batch answers:
+#   1. Does the feathered unmerge remove the leaf-boundary tile seams?
+#      -> debug A/B grid (hard vs smooth) on the fisherman, visual
+#   2. Is the LPIPS ~0.5 "different valid sample" or "worse sample"?
+#      -> re-eval the tail-gated oracle set with ImageReward delta; near 0 =
+#         divergence not damage, clearly < 0 = real quality loss
+# run from experiments/: nohup ./run_queue.sh queues/queue_phase3d.txt > queue_phase3d.log 2>&1 &
+# prerequisites: results/traj, results/base_dev_1024; pip install image-reward
+
+# 1. seam A/B on the fisherman (hard vs sigma 0.8/1.0/1.5) — visual, ~4 min
+python debug_e2_smoke.py --out results/debug_e2_v3
+
+# 2a. ImageReward on the EXISTING tail-gated oracle set (re-runs eval, appends IR)
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t090
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_tmin15/e2e_t095
+
+# 2b. smooth-unmerge oracle e2e (tail-gated + feather) at the two best taus,
+#     then eval with ImageReward — does the seam fix also lower LPIPS?
+python oracle_spatial.py --traj results/traj --mode e2e --merge-tmin 0.15 --smooth-sigma 1.0 --taus 0.90 0.95 --out results/anatomy_spatial_smooth
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_smooth/e2e_t090
+python eval_pairs.py --baseline results/base_dev_1024 --variant results/anatomy_spatial_smooth/e2e_t095
+
+# read (into PHASE3_NOTES):
+#   debug_e2_v3: seams gone in *_s* vs hard control?  pick the smallest sigma that clears them
+#   ir_delta ~0 while lpips ~0.5  -> E2 is quality-preserving, LPIPS mismeasures divergence
+#   smooth lpips < hard lpips      -> seams were a real chunk of the LPIPS; report both

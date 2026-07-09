@@ -25,6 +25,13 @@ class MergePlan:
     leaf_ids: torch.Tensor  # (M, 3) — positional (t, h, w) ids per leaf
     weights: torch.Tensor   # (N,) — per-token unmerge weight (ones if unweighted)
     n_leaves: int
+    h_tok: int = 64
+    w_tok: int = 64
+    # smooth unmerge: feathers the hard leaf-delta field to kill the block
+    # seams that hard axis-aligned partitioning leaves (ToMeSD avoids seams
+    # via soft matching + full-res unmatched tokens; we keep the shrunk
+    # sequence and instead interpolate the delta across leaf boundaries)
+    smooth_sigma: float = 0.0
     # profiling (IDEAS_TASKS 0.3): Flux.forward records CUDA events around
     # merge/unmerge when profile is set; denoise() reads them after its sync
     profile: bool = False
@@ -50,6 +57,7 @@ class AdaptiveConfig:
     pe_mode: str = "centroid"        # "centroid" | "nearest" | "corner" (A.4)
     weighted_unmerge: bool = True
     noise_unmerge: bool = True       # analytic (x - x_bar)/t velocity correction
+    smooth_sigma: float = 0.0        # >0 feathers leaf-delta seams (token units)
     # Part-0 extensions (IDEAS_TASKS 0.1)
     oracle_feats: torch.Tensor | None = None  # (N, D) overrides metric source (Part B)
     uniform_size: int | None = None           # force all leaves to s x s (baselines)
@@ -118,7 +126,8 @@ def build_uniform_plan(s: int, img_ids: torch.Tensor, cfg: AdaptiveConfig) -> Me
     if cfg.scale_axis:
         leaf_ids[:, 0] = 0.5 * torch.log2(counts.float())
     weights = torch.ones(h * w, device=device)
-    return MergePlan(assign, counts, leaf_ids, weights, n, profile=cfg.profile)
+    return MergePlan(assign, counts, leaf_ids, weights, n, h_tok=h, w_tok=w,
+                     smooth_sigma=cfg.smooth_sigma, profile=cfg.profile)
 
 
 def build_merge_plan(feats: torch.Tensor, img_ids: torch.Tensor,
@@ -198,7 +207,8 @@ def build_merge_plan(feats: torch.Tensor, img_ids: torch.Tensor,
     else:
         weights = torch.ones(h * w, device=device)
 
-    return MergePlan(assign, counts, leaf_ids, weights, next_id, profile=cfg.profile)
+    return MergePlan(assign, counts, leaf_ids, weights, next_id, h_tok=h, w_tok=w,
+                     smooth_sigma=cfg.smooth_sigma, profile=cfg.profile)
 
 
 def merge_tokens(x: torch.Tensor, plan: MergePlan) -> torch.Tensor:
@@ -209,10 +219,50 @@ def merge_tokens(x: torch.Tensor, plan: MergePlan) -> torch.Tensor:
     return out / plan.counts[None, :, None].to(x.dtype)
 
 
+def _gaussian_blur2d(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable depthwise Gaussian blur of (B, C, H, W) with reflect padding.
+    Inside a homogeneous region it is a no-op (constant stays constant); it
+    only moves values across intensity boundaries — exactly the feathering the
+    leaf-delta field needs."""
+    radius = max(1, int(round(3 * sigma)))
+    xs = torch.arange(-radius, radius + 1, device=x.device, dtype=torch.float32)
+    k = torch.exp(-(xs ** 2) / (2 * sigma ** 2))
+    k = (k / k.sum()).to(x.dtype)
+    C = x.shape[1]
+    kh = k.view(1, 1, -1, 1).expand(C, 1, -1, 1)
+    kw = k.view(1, 1, 1, -1).expand(C, 1, 1, -1)
+    x = F.pad(x, (0, 0, radius, radius), mode="reflect")
+    x = F.conv2d(x, kh, groups=C)
+    x = F.pad(x, (radius, radius, 0, 0), mode="reflect")
+    x = F.conv2d(x, kw, groups=C)
+    return x
+
+
+def _smooth_delta_field(delta: torch.Tensor, plan: MergePlan) -> torch.Tensor:
+    """Feather the per-token leaf-delta field (B, N, D) across leaf boundaries.
+
+    Blends the hard delta with its Gaussian-blurred version, gated per token by
+    alpha = 1 - 1/leaf_side: 1x1 leaves (kept full-res for detail) get alpha=0
+    and are untouched; large flat leaves get near-1 and their hard block edges
+    are feathered into a ramp. sigma=0 short-circuits to the identity."""
+    if plan.smooth_sigma <= 0:
+        return delta
+    B, N, D = delta.shape
+    h, w = plan.h_tok, plan.w_tok
+    grid = delta.view(B, h, w, D).permute(0, 3, 1, 2).contiguous()  # (B, D, H, W)
+    blur = _gaussian_blur2d(grid, plan.smooth_sigma)
+    blur = blur.permute(0, 2, 3, 1).reshape(B, N, D)
+    side = plan.counts[plan.assign].float().sqrt()                  # (N,)
+    alpha = (1.0 - 1.0 / side).clamp(0, 1)[None, :, None].to(delta.dtype)
+    return (1 - alpha) * delta + alpha * blur
+
+
 def unmerge_delta(x_full: torch.Tensor, merged_in: torch.Tensor,
                   merged_out: torch.Tensor, plan: MergePlan) -> torch.Tensor:
-    """Broadcast the merged *update* back: token_i += w_i * (out - in)[leaf(i)]."""
+    """Broadcast the merged *update* back: token_i += w_i * smooth((out - in)[leaf(i)]).
+    Smoothing (plan.smooth_sigma > 0) feathers the hard leaf-block seams."""
     delta = (merged_out - merged_in)[:, plan.assign]          # (B, N, D)
+    delta = _smooth_delta_field(delta, plan)
     delta = delta * plan.weights[None, :, None].to(delta.dtype)
     return x_full + delta
 

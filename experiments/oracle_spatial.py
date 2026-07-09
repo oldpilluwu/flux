@@ -123,7 +123,7 @@ def e2e(model, ae, rec, dev, args, out_dir: Path):
         # merge_tmin keeps the low-t tail full-res: the (x-x_bar)/t correction
         # amplifies residual within-leaf inhomogeneity as t->0 (Phase-3 finding)
         cfg = AdaptiveConfig(tau=tau, oracle_feats=dev["final"], h_tok=h, w_tok=w,
-                             merge_tmin=args.merge_tmin)
+                             merge_tmin=args.merge_tmin, smooth_sigma=args.smooth_sigma)
         img = rec["imgs"][0].to(device).to(torch.bfloat16)[None]  # the initial noise
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -144,6 +144,7 @@ def e2e(model, ae, rec, dev, args, out_dir: Path):
         records.append({
             "prompt": rec["prompt"], "seed": rec["seed"], "file": fname,
             "mode": "oracle_spatial", "tau": tau, "merge_tmin": args.merge_tmin,
+            "smooth_sigma": args.smooth_sigma,
             "size": rec["size"], "steps": rec["steps"], "n_tokens": n, "denoise_s": dt,
             "tokens_per_step": tps,
             "compression": n / (sum(tps) / len(tps)),
@@ -164,6 +165,8 @@ def main():
     p.add_argument("--step-stride", type=int, default=5)
     p.add_argument("--merge-tmin", type=float, default=0.0,
                    help="e2e: keep steps with t < tmin full-res (tail-gating)")
+    p.add_argument("--smooth-sigma", type=float, default=0.0,
+                   help="e2e: feather leaf-delta seams (token units, 0=off)")
     p.add_argument("--limit", type=int, default=None, help="use only the first N trajectories")
     args = p.parse_args()
 
