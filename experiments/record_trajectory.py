@@ -22,7 +22,11 @@ def load_inps(xs: dict, prompts: dict, text_cache: str, device) -> dict:
     """probe.py's text-conditioning path: prefer the precomputed cache; never
     co-load T5/CLIP with the transformer (host-RAM watchdog on this machine)."""
     inps = {}
-    if text_cache and Path(text_cache).exists():
+    if text_cache:
+        if not Path(text_cache).exists():
+            raise SystemExit(
+                f"text cache not found: {text_cache} — run precompute_text.py first, "
+                "or pass --text-cache '' to load T5/CLIP instead")
         cache = torch.load(text_cache, map_location="cpu", weights_only=True)
         for pi, prompt in prompts.items():
             if prompt not in cache:

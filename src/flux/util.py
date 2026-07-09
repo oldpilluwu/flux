@@ -654,6 +654,19 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
+def load_sft_streaming(ckpt_path: str, device: str = "cpu") -> dict[str, torch.Tensor]:
+    """Stream tensors one-by-one to the target device. load_sft (load_file)
+    buffers the whole 23.8 GB checkpoint in host RAM while a second copy lands
+    on the GPU, which can exceed system RAM on this machine."""
+    from safetensors import safe_open
+
+    sd = {}
+    with safe_open(ckpt_path, framework="pt", device=device) as f:
+        for k in f.keys():
+            sd[k] = f.get_tensor(k)
+    return sd
+
+
 def load_flow_model(name: str, device: str | torch.device = "cuda", verbose: bool = True) -> Flux:
     # Loading Flux
     print("Init model")
