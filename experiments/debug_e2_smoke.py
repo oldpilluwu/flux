@@ -48,11 +48,15 @@ from generate import pack_img
 
 CONFIGS = [
     ("baseline", None),
-    ("t090_tmin15", dict(tau=0.9, merge_tmin=0.15)),                  # hard unmerge (seams)
-    ("t090_tmin15_s08", dict(tau=0.9, merge_tmin=0.15, smooth_sigma=0.8)),
-    ("t090_tmin15_s15", dict(tau=0.9, merge_tmin=0.15, smooth_sigma=1.5)),
-    ("t095_tmin15", dict(tau=0.95, merge_tmin=0.15)),
-    ("t095_tmin15_s10", dict(tau=0.95, merge_tmin=0.15, smooth_sigma=1.0)),
+    ("t090_tmin15", dict(tau=0.9, merge_tmin=0.15)),                  # ungated control
+    # magnitude-gate A/B at matched tau: cosine is scale-blind, so a lighting
+    # ramp merges and flattens (background banding). The gate rejects blocks
+    # whose within-block norm CV exceeds the threshold. Sweep the threshold:
+    ("t090_tmin15_mg05", dict(tau=0.9, merge_tmin=0.15, mag_gate=0.05)),
+    ("t090_tmin15_mg10", dict(tau=0.9, merge_tmin=0.15, mag_gate=0.10)),
+    ("t090_tmin15_mg20", dict(tau=0.9, merge_tmin=0.15, mag_gate=0.20)),
+    # gate + gentle feather (seams on the leaves that survive the gate)
+    ("t090_tmin15_mg10_s08", dict(tau=0.9, merge_tmin=0.15, mag_gate=0.10, smooth_sigma=0.8)),
 ]
 
 

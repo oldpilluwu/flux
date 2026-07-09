@@ -254,6 +254,47 @@ def test_smooth_unmerge():
     assert smooth.isfinite().all() and not torch.allclose(hard, smooth)
 
 
+def test_mag_gate_rejects_magnitude_gradients():
+    # cosine is scale-blind: tokens all pointing the same direction merge even
+    # when their MAGNITUDES ramp across the block. The gate must reject those.
+    torch.manual_seed(11)
+    direction = torch.randn(D)
+    direction = direction / direction.norm()
+    # every token is a positive multiple of one direction -> min-cos ~1.0
+    # everywhere, so cosine alone merges the whole grid to 8x8.
+    ramp = torch.linspace(1.0, 5.0, W)[None, :].expand(H, W).reshape(N, 1)  # magnitude ramp along w
+    feats = ramp * direction[None, :]
+
+    ungated = build_merge_plan(feats, IDS, AdaptiveConfig(tau=0.8, h_tok=H, w_tok=W))
+    plan_invariants(ungated)
+    assert (ungated.leaf_size_map(H, W) == 8).all(), "cosine-only merges the ramp to 8x8"
+
+    gated = build_merge_plan(feats, IDS,
+                             AdaptiveConfig(tau=0.8, h_tok=H, w_tok=W, mag_gate=0.05))
+    plan_invariants(gated)
+    # the gate splits gradient blocks; the steepest relative spread is at the
+    # low-magnitude (left) end, which must not survive as an 8x8 leaf. (A linear
+    # ramp's CV shrinks toward its high end, so some right blocks legitimately
+    # still merge — the gate is about relative spread, not absolute.)
+    gsize, usize = gated.leaf_size_map(H, W), ungated.leaf_size_map(H, W)
+    assert gated.n_leaves > ungated.n_leaves, "gate must split the gradient blocks"
+    assert (gsize == 8).sum() < (usize == 8).sum(), "fewer 8x8 leaves under the gate"
+    assert (gsize[:8, :8] < 8).all(), "highest-CV (left) block must not merge to 8x8"
+
+    # a block with uniform magnitude (only direction jitter) still merges under
+    # the gate — it only rejects magnitude spread, not benign homogeneity
+    torch.manual_seed(12)
+    flat = torch.ones(N, D) + 0.005 * torch.randn(N, D)
+    fg = build_merge_plan(flat, IDS,
+                          AdaptiveConfig(tau=0.8, h_tok=H, w_tok=W, mag_gate=0.05))
+    assert (fg.leaf_size_map(H, W) == 8).all(), "uniform-magnitude block must still merge"
+
+    # gate off (default None) is unchanged from the ungated plan
+    off = build_merge_plan(feats, IDS,
+                           AdaptiveConfig(tau=0.8, h_tok=H, w_tok=W, mag_gate=None))
+    assert (off.assign == ungated.assign).all()
+
+
 def test_e2_forward_and_denoise_integration():
     # tiny Flux on CPU: exercises Flux.forward's merge/unmerge path and
     # denoise(adaptive=...) wiring — shapes, plan logging, x0 fallback

@@ -66,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="disable the analytic (x - x_bar)/t velocity correction (ablation)")
     p.add_argument("--smooth-sigma", type=float, default=0.0,
                    help="feather leaf-delta seams; token units, 0=off (E2 unmerge)")
+    p.add_argument("--mag-gate", type=float, default=None,
+                   help="reject blocks whose within-block norm CV exceeds this "
+                        "(fixes cosine's scale-blindness / background banding); off by default")
     p.add_argument("--base", type=int, default=8, help="quadtree base leaf size")
     p.add_argument("--uniform-size", type=int, default=None,
                    help="force flat s x s leaves (matched-compute baseline, IDEAS_TASKS A.2)")
@@ -154,6 +157,7 @@ def make_adaptive(args: argparse.Namespace):
         prop_attn=args.prop_attn, base=args.base, h_tok=h_tok, w_tok=w_tok,
         pe_mode=args.pe_mode, weighted_unmerge=not args.unweighted_unmerge,
         noise_unmerge=not args.no_noise_unmerge, smooth_sigma=args.smooth_sigma,
+        mag_gate=args.mag_gate,
         uniform_size=args.uniform_size, plan_every=args.plan_every,
         profile=args.profile,
     )

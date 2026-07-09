@@ -58,6 +58,12 @@ class AdaptiveConfig:
     weighted_unmerge: bool = True
     noise_unmerge: bool = True       # analytic (x - x_bar)/t velocity correction
     smooth_sigma: float = 0.0        # >0 feathers leaf-delta seams (token units)
+    mag_gate: float | None = None    # if set, a block also needs within-block norm
+                                     # CV (std/mean of per-token ||feat||) <= mag_gate
+                                     # to merge. Cosine is scale-blind, so a smooth
+                                     # magnitude gradient (e.g. a lighting ramp) reads
+                                     # as homogeneous and collapses to its mean -> the
+                                     # background banding. This rejects those blocks.
     # Part-0 extensions (IDEAS_TASKS 0.1)
     oracle_feats: torch.Tensor | None = None  # (N, D) overrides metric source (Part B)
     uniform_size: int | None = None           # force all leaves to s x s (baselines)
@@ -160,6 +166,10 @@ def build_merge_plan(feats: torch.Tensor, img_ids: torch.Tensor,
                    .squeeze(-1).max(dim=1).values)
             tau_eff = cfg.tau + (1 - cfg.tau) * sal
         ok = min_cos >= tau_eff
+        if cfg.mag_gate is not None:   # reject blocks with a magnitude gradient that
+            norms = xb.norm(dim=-1)                       # (n_blocks, s*s)
+            cv = norms.std(dim=1) / norms.mean(dim=1).clamp_min(1e-6)
+            ok = ok & (cv <= cfg.mag_gate)                # cosine can't see (banding fix)
         ok_full = (ok.view(h // s, w // s)
                      .repeat_interleave(s, 0).repeat_interleave(s, 1))
         take = ok_full & ~covered      # blocks are aligned across levels, so this
